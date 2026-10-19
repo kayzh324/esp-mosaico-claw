@@ -282,7 +282,149 @@ call_start_cpu0()
 
 ---
 
-## 12. 关键实现文件索引
+## 11.1 决议更新：整体去除，只借"主机测试"方法
+
+> 触发点：自定义硬件**没有在线市场、也没有用户分享固件的生态**，Vibe Mode 的绝大多数价值（Ideas 商店、在线固件分发、HTTPS Bridge）在本产品上**不存在受众**。
+
+**决议：Vibe Mode 整体去除**（不保留运行时，不做"自建维护固件"）。
+
+**去除后回收的硬约束（逐项核实）：**
+
+| 约束 | 去除后 |
+|---|---|
+| 前 2 MiB 冻结 ABI（5 个不可变分区） | **解除**，分区表可自由排布 |
+| 回收的 Flash 空间 | **约 1.96 MiB**（`vibe_mode` 1.75 MiB + `sysmeta` 80 KiB） |
+| bootloader 归属（烧 bundle 的 bootloader） | **解除**，用自己构建的 bootloader |
+| bootloader 24 KiB 容量上限 + CO5300 Logo | **解除**（换 DSI 屏不再需要回 utils 改 bootloader） |
+| `flash` / `update-flash` 被 `retained_recovery.cmake` 接管 | **解除**（该文件 118 行，整体删除） |
+| S31 专属预编译包 | **解除**，不再需要为 P4 重建 Vibe Mode |
+
+**产品侧需要改动的点极少（已核实全部）：**
+
+| 位置 | 内容 | 处置 |
+|---|---|---|
+| `tools/cmake/retained_recovery.cmake` | 118 行，接管 flash 目标 | 删除 |
+| `CMakeLists.txt:107` | `include(retained_recovery.cmake)` | 删除该行 |
+| `components/app_claw/app_claw_cli.c` | `request_vibe_mode` / `cmd_vibe`（约 101 行）+ `mosaico_recovery_contract.h` 引用 | 删除 |
+| `components/app_claw/CMakeLists.txt:52` | utils 头文件 include 目录 | 删除 |
+| `partitions_16MB.csv` | 5 个冻结分区 | 重写 |
+| `tools/package_firmware.py:19` | `TARGET = "esp32s31"` | 改 `esp32p4` |
+| `third-party/esp-mosaico-utils` | 子模块 | **可整体移除**（除上述外无其它引用） |
+
+**为什么"裁剪"不如"整体去除"：**
+
+Vibe Mode 的组件树里，与在线生态绑定的占绝大多数：
+
+| 组件 | 是否在线生态 | 说明 |
+|---|---|---|
+| `app_ideas` | ✅ 是 | 在线小应用商店（6 位码下载） |
+| `app_update_check` | ✅ 是 | `https://dl.espressif.com/mosaico/` 在线固件清单 |
+| `app_bridge` | ✅ 是 | HTTPS 远程维护 Bridge |
+| `app_network` | ✅ 是 | 仅为上述在线功能提供 Wi-Fi/mDNS |
+| `app_iris` | 部分 | Iris 协议（USB/TCP 本地维护） |
+| `app_nand_update` | ❌ 否 | NAND 离线更新（**本板无 NAND**） |
+| `app_storage` | ❌ 否 | SPI NAND + LittleFS（**本板无 NAND**） |
+| `app_ui` | ❌ 否 | Vibe Mode 自己的 480×480 `vui` UI（**不是** GSP UI） |
+| `app_system` / `app_system_update` | ❌ 否 | NVS/OTA/GPIO + 更新事务 |
+| `app_settings` / `app_device` | ❌ 否 | 偏好设置 / 电量+IMU+按键（**本板无电量计/IMU**） |
+
+去掉在线生态 + 无 NAND + 无电池/IMU 之后，剩下的只有 `app_system` + USB 更新路径——**已不足以支撑"保留一个固件"的成本**。
+
+**⚠️ 必须区分的两类"在线"：**
+
+- **要删的**：*固件/应用分发生态*（Ideas 商店、在线固件清单、Bridge）。
+- **要留的**：*产品自身的 AI 服务端点*——`trial_provider`（`mosaico-asr.espressif.com.cn`）、`weather_service`（`api.met.no`）、`update_check_service`、`wechat_binding_service`。这些是产品功能，不是生态。
+
+**唯一值得保留的东西：主机交互测试的方法，不是代码。**
+
+Vibe Mode 的 `pc/` 模拟器**不能**用来测你的新 UI——它跑的是 `vui.c`（Vibe Mode 自绘的 480×480 RGB565 UI，`simulator.py` 里 `480` 硬编码在画布、像素缓冲、坐标映射三处），与 GSP 场景层完全是两套栈。它的可复用价值只有**架构模式**：
+
+- `pc/platform_pc.c`：把 UI 与平台解耦，用 mock 提供 `snapshot` / `command` / `setting` / `key` / `preview`；
+- `simulator.py`：HTTP 服务帧（PNG）+ 指针注入 + 状态 trace。
+
+**这套模式在 esp-gsp 里已有官方等价物，且直接跑 GSP 场景**——见下一节。
+
+---
+
+## 12. PC 交互测试：用 esp-gsp 官方 `sim_bridge`，不用 Vibe Mode 模拟器
+
+### 12.1 `sim_bridge` 是什么
+
+`espressif/esp-gsp` 自带 **native C simulator bridge**（`tools/sim_bridge/`），把可移植的 C UI 源码编译成本机动态库，用 `sim_host` 渲染成浏览器画布：
+
+- 支持**指针输入注入**、**截图断言**、**自动化会话**（`--headless --api-port`）；
+- 提供 **RPC 客户端**（`rpc_client.py`）用于回归测试；
+- 输入方式：`--input-mode api-exclusive` / `browser-exclusive`；
+- 分辨率**由 bundle 决定**（不是硬编码），因此 800×1280 可直接预览；
+- 自 **esp-gsp 1.2.0** 起存在，1.3.0 已含（本仓约束 `^1.3.0`，可用）。
+
+**这正好是"编译期响应式"的最佳配套**：场景在编译期按目标分辨率求解，模拟器按同一 bundle 渲染，所见即所得，不需要上板。
+
+### 12.2 ⚠️ 现状：`sim_bridge` 对 `mosaic_ui` 的覆盖不完整
+
+把 `mosaic_ui` 实际用到的 **65 个** `esp_gsp_*` API 与 `sim_bridge`（master，含 1.3.0）逐一比对：
+
+| 分类 | 数量 | 说明 |
+|---|---|---|
+| 已实现 | **36** | 可直接跑 |
+| `static inline`（头文件内联） | 3 | 无需链接 |
+| 设备专属（`esp_gsp_esp_lcd_*`） | 8 | PC 侧不需要；**且 16 个调用点全部集中在 `core/mosaic_esp_platform.c` 一个文件** |
+| **真缺失** | **18** | 见下表 |
+
+**缺失清单（按影响排序）：**
+
+| API | 调用点 | 影响 |
+|---|---|---|
+| `esp_gsp_stack_view_push` / `pop` / `get_top` / `is_animating` | 41 处 / 6 文件 | **页面栈导航，核心中的核心** |
+| `esp_gsp_set_overlay_contributor` + `overlay_builder_round_rect` / `glyph_a8` | 16 处 / 1 文件 | App shell 顶栏/角标绘制 |
+| `esp_gsp_component_animate_position_to` / `get_position` / `stop_position_animation` | 14 处 / 3 文件 | 位移动画 |
+| `esp_gsp_set_input_interceptor` | 6 处 / 2 文件 | 输入拦截 |
+| `esp_gsp_component_set_many` / `set_properties` | 4 处 / 2 文件 | 批量属性写 |
+| `esp_gsp_on_pinch` | 2 处 / 1 文件 | 相册缩放 |
+| `esp_gsp_message_list_bind_component` / `changed` | 2 处 / 1 文件 | AI 会话列表 |
+| `esp_gsp_config_override_set` / `esp_gsp_stop` | 2 处 / 1 文件 | 初始化/关闭 |
+
+**这不是"补几个函数"就能解决的缺口**：页面栈与 overlay 是承载性能力，缺了等于跑不起来。
+
+### 12.3 对方案的影响（重要，正向）
+
+这恰好**支持**"自写 GSP 场景层"的决策，并给出一条明确的设计约束：
+
+> **自研 UI 只使用 `sim_bridge` 已实现的 API 子集**，从而**天然获得 PC 交互测试能力**。
+
+具体做法：
+
+1. **导航**：不用 `stack_view`，改为**场景切换 + 显式页面状态机**（`esp_gsp_goto_scene` 已实现）。这与"编译期响应式"也不冲突——页面本身是编译产物。
+2. **顶栏/角标**：不用 `overlay_contributor`，改为**场景内的普通组件**（编译期生成，反而更好做响应式布局）。
+3. **动画**：用 `component_animate_property`（已实现）替代 `animate_position_to`；位置变化走属性动画。
+4. **批量写**：拆成多次 `set_*`（已实现），或自建封装。
+5. **输入拦截**：用 `esp_gsp_on_event`（已实现）+ 自有分发层，正好是 §5.4 "输入归一化层"要干的事。
+
+**收益**：不需要为上板调试付出"每次改 UI 都要烧录"的代价；且这套子集约束会**倒逼 UI 层与设备解耦**，对多板/多形态是好事。
+
+**代价**：放弃 `stack_view` 的转场动画与 `overlay` 的合成层（overlay 走 PPA 合成，性能更好）。若后期确实需要，再向 esp-gsp 提交 `sim_bridge` 扩展即可（该 bridge 是官方维护的，README 明确说明按 `bridge_api_version` 增量扩展）。
+
+### 12.4 落地形态
+
+```
+components/<our_ui>/
+  pc/CMakeLists.txt        # gsp_add_backend(<ui> SOURCES ... SCENES ...)
+  pc/platform_pc.c         # mock 服务层（替代 display_service / wifi / audio / sd）
+  pc/app_bridge.c          # gsp_bridge_app_init/deinit 两个入口
+  scenes/*.json            # 编译期响应式生成
+```
+
+运行：
+
+```sh
+python managed_components/espressif__esp-gsp/tools/sim_bridge/run.py --project pc
+```
+
+依赖 `esp-gsp-tools`（`pip install -U esp-gsp-tools`），会按组件版本自动匹配 `gspc` 与 `gsp_sim`。
+
+---
+
+## 13. 关键实现文件索引
 
 | 主题 | 路径（相对 `third-party/esp-mosaico-utils/`） |
 |---|---|
@@ -311,4 +453,4 @@ call_start_cpu0()
 
 ---
 
-*本文档为只读勘察快照。开工时以 §11 建议与主决策文档 §8 待决项为起点。*
+*本文档为只读勘察快照；§11.1 起为决议更新。开工时以主决策文档 §5.8 与 §8 为起点。*

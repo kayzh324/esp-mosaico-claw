@@ -21,6 +21,8 @@
 - **esp-claw 本地二开（修 bug）与本方案正交**：把 submodule 指向本地 fork 即可。
 - **目标硬件已定：ESP32-P4 + JC-ESP32P4-M3-DEV（板载 C6）+ JD9365 10.1″ DSI 无触控。** 调研确认：**Wi-Fi/DSI/音频/USB HID/SD/PPA/GSP 全部就绪**，无线走产品层已内置的 `esp_wifi_remote`+`esp_hosted`。
 - **唯一硬功能缺失：蓝牙音频 A2DP**（板载 C6 无 Classic BR/EDR）→ **决议：去掉该 App**（非核心功能）。
+- **Vibe Mode 整体去除**：自定义硬件没有在线市场/固件分享生态，其核心价值（Ideas 商店、在线固件、Bridge）无受众。回收约 1.96 MiB Flash，并解除"前 2 MiB 冻结 ABI + bootloader 归属"约束。
+- **UI 调试改用 esp-gsp 官方 `sim_bridge`**（PC 交互测试，分辨率由 bundle 决定），并把自研 UI 约束在其已实现的 API 子集内。
 - **调研结论**：mosaico 上层封装**大体与芯片解耦**，S31 锁定集中在**板级 + 启动 + Vibe Mode + 打包目标**，不在服务层。
 
 ---
@@ -213,8 +215,8 @@ Python 场景生成器(本仓库) → 闭源预编译 GSP 编译器 gspc(esp-gsp
 | `third-party/esp-claw` | submodule → 本地 fork | 独立迭代 |
 | `components/mosaic_ui`（场景作者层/apps） | **自研替代** | 响应式布局 + 新形态场景 |
 | `components/mosaic_ui/apps/bluetooth` | **去除** | A2DP(Classic) 依赖；板载 C6 无 BR/EDR，P4 上不可用（见 `docs/p4-vs-s31-feasibility.md` §7.2） |
-| `components/mosaico_boot_splash` | **改写/去除** | CO5300/QSPI 专属 bootloader 手递手 |
-| `third-party/esp-mosaico-utils` / `retained_recovery.cmake` / `partitions_16MB.csv` | **基本去除** | 单产品 Vibe Mode 固化，非通用 |
+| `components/mosaico_boot_splash` | **去除** | CO5300/QSPI 专属 bootloader 手递手；换 DSI 屏后无意义 |
+| `third-party/esp-mosaico-utils` + `retained_recovery.cmake` + `partitions_16MB.csv` | **整体去除** | Vibe Mode 无在线生态受众（见 §5.8）；回收约 1.96 MiB Flash，解除前 2 MiB 冻结 ABI 与 bootloader 归属 |
 | `tools/cmake/esp_idf_patch.cmake` | 视需要 | 改 IDF 源码；换 IDF 版本需复检 |
 
 ### 5.6 上游协作与分支工作流
@@ -245,6 +247,54 @@ Python 场景生成器(本仓库) → 闭源预编译 GSP 编译器 gspc(esp-gsp
 3. **删除** `mosaic_ui/apps/bluetooth`（A2DP 不可用，且非核心）。
 4. **去除** boot splash（CO5300/QSPI 专属，且 bootloader 分支本就是死代码）。
 5. 功能裁剪：无 IMU/磁力计/电量计 → 裁 `app_claw_hw_bridge` 资源表；供电按 USB 固定，不做电池策略。
+6. **Vibe Mode 整体去除**（见 §5.8）。
+
+### 5.8 Vibe Mode 决议：整体去除
+
+**触发点**：自定义硬件**没有在线市场、没有用户分享固件的生态**。Vibe Mode 的核心价值（Ideas 在线应用商店、在线固件清单 `dl.espressif.com/mosaico/`、HTTPS 远程维护 Bridge）在本产品上**不存在受众**。
+
+**决议**：**整体去除**，不保留运行时，也不做"自建维护固件"。
+
+**回收的硬约束**（此前都被视为"与 UI 同级的冻结层"）：
+
+| 约束 | 去除后 |
+|---|---|
+| 前 2 MiB 冻结 ABI（5 个不可变分区） | **解除**，分区表可自由排布 |
+| Flash 空间 | **回收约 1.96 MiB**（`vibe_mode` 1.75 MiB + `sysmeta` 80 KiB） |
+| bootloader 归属（产品烧 bundle 的 bootloader） | **解除**，用自己构建的 bootloader |
+| bootloader 24 KiB 容量上限 + CO5300 Logo | **解除**（换 DSI 屏不再需要回 utils 改 bootloader） |
+| `flash`/`update-flash` 被 `retained_recovery.cmake` 接管 | **解除**（该文件 118 行整体删除） |
+| S31 专属预编译包 | **解除**，不再需要为 P4 重建 Vibe Mode |
+
+**产品侧改动点（已全量核实，范围极小）**：
+
+| 位置 | 处置 |
+|---|---|
+| `tools/cmake/retained_recovery.cmake`（118 行） | 删除 |
+| `CMakeLists.txt:107` 的 `include(...)` | 删除该行 |
+| `components/app_claw/app_claw_cli.c` 的 `request_vibe_mode`/`cmd_vibe`（约 101 行） | 删除 |
+| `components/app_claw/CMakeLists.txt:52` 的 utils include | 删除 |
+| `partitions_16MB.csv` | 重写 |
+| `tools/package_firmware.py:19` `TARGET = "esp32s31"` | 改 `esp32p4` |
+| `third-party/esp-mosaico-utils` 子模块 | **可整体移除**（无其它引用） |
+
+**为什么不是"裁剪"而是"整体去除"**：Vibe Mode 的 12 个组件中，`app_ideas`（在线商店）、`app_update_check`（在线清单）、`app_bridge`（HTTPS Bridge）、`app_network`（仅服务上述）都属在线生态；`app_nand_update`/`app_storage` 依赖 NAND（**本板无**）；`app_settings`/`app_device` 依赖电量计+IMU（**本板无**）；`app_ui` 是 Vibe Mode 自己的 480×480 `vui` UI（**不是** GSP UI）。剩下的只有 `app_system` + USB 更新路径，已不足以支撑保留一个固件。
+
+**⚠️ 两类"在线"必须区分**：
+- **删**：*固件/应用分发生态*（Ideas 商店、在线固件清单、Bridge）。
+- **留**：*产品自身的 AI 服务端点*——`trial_provider`、`weather_service`、`update_check_service`、`wechat_binding_service`。这些是产品功能，不是生态。
+
+**唯一保留的是"主机交互测试"能力，但不是 Vibe Mode 的模拟器。**
+
+Vibe Mode 的 `pc/` 模拟器跑的是 `vui.c`（自绘 480×480 RGB565，`simulator.py` 中 `480` 硬编码于画布/像素缓冲/坐标映射三处），与 GSP 场景层是两套栈，**测不了新 UI**。正确做法是用 **esp-gsp 官方 `sim_bridge`**（`tools/sim_bridge/`，自 1.2.0 起随组件发布）：它把可移植 C UI 编译成本机动态库，用 `sim_host` 渲染到浏览器，支持指针注入、截图断言、自动化会话，且**分辨率由 bundle 决定**，800×1280 可直接预览。
+
+**一条重要的设计约束（实测得出）**：`mosaic_ui` 用到的 65 个 `esp_gsp_*` API 中，`sim_bridge` 已实现 36 个、内联 3 个、设备专属 8 个（16 个调用点全部集中在 `core/mosaic_esp_platform.c` 单文件），**真缺失 18 个**，其中包括 `stack_view_*`（41 处/6 文件）与 `overlay_contributor`（16 处/1 文件）这类承载性能力。
+
+因此：
+
+> **自研 UI 应约束在 `sim_bridge` 已实现的 API 子集内** → 天然获得 PC 交互测试能力。
+
+对应替换方案：导航用 `goto_scene` + 显式页面状态机（不用 `stack_view`）；顶栏/角标用场景内普通组件（不用 `overlay`）；动画用 `component_animate_property`（不用 `animate_position_to`）；输入用 `on_event` + 自有归一化层（不用 `input_interceptor`）。代价是放弃 stack_view 转场与 overlay 的 PPA 合成层，收益是**改 UI 不必烧录**，且倒逼 UI 与设备解耦。详见 `docs/vibe-mode-and-ideas-analysis.md` §11.1–§12。
 
 ---
 
@@ -272,13 +322,14 @@ Python 场景生成器(本仓库) → 闭源预编译 GSP 编译器 gspc(esp-gsp
 > 因此 Spike 只保留**真正未知**的三项。
 
 1. **GSP 非 480 实测**：在 800×1280 跑一个 GSP 场景，测帧率/内存/带宽 → 决定是否坚持 GSP（唯一可能推翻 UI 路线的点）。
+   - **可先在 PC 上做一半**：`sim_bridge` 能按 800×1280 的 bundle 渲染，先验证布局/交互/文字排版；帧率/带宽仍必须上板实测（模拟器明确声明不替代设备时序验证）。
 2. **响应式单点改造**：照 `welcome` 的 width 参数化改一个 app（如 `settings`），度量"单 app 改造行数/耗时" → ×15 估总量。
 3. **冲突面盘点**：记录被迫编辑的共享文件清单 = 真实合并冲突面。
 
 **Go/No-Go 判定**：
-- 若 §7.1 性能达标且 §7.3 冲突面可控 → 按本方案执行。
-- 若 §7.1 不达标 → 回退到"服务层 + LVGL 自研 UI"（放弃 GSP/PPA 合成），其余不变。
-- 若 §7.3 冲突面过大（大量深改共享文件）→ 调整为"**抽取组件自建工程**"：vendor 服务层组件 + esp-claw submodule，不整仓跟踪。
+- 若第 1 项性能达标且第 3 项冲突面可控 → 按本方案执行。
+- 若第 1 项不达标 → 回退到"服务层 + LVGL 自研 UI"（放弃 GSP/PPA 合成），其余不变。
+- 若第 3 项冲突面过大（大量深改共享文件）→ 调整为"**抽取组件自建工程**"：vendor 服务层组件 + esp-claw submodule，不整仓跟踪。
 
 ---
 
@@ -290,9 +341,9 @@ Python 场景生成器(本仓库) → 闭源预编译 GSP 编译器 gspc(esp-gsp
 - [x] ~~P4 无线方案~~ → **板载 C6（SDIO + ESP-Hosted）**；产品层 `wifi_manager` 已内置 `target in [esp32p4]` 分支。
 - [x] ~~蓝牙音频~~ → **C6 无 Classic BR/EDR，A2DP 不可用 → 决议去除 `mosaic_ui/apps/bluetooth`**。
 - [x] ~~boot splash~~ → 换 P4+DSI 后 **直接去除**（原实现为 CO5300/QSPI + `LP_STORE15` 手递手，且其 bootloader 分支本就是死代码）。
+- [x] ~~Vibe Mode 去留~~ → **整体去除**（无在线生态受众）；只保留"主机交互测试"能力，且改用 **esp-gsp 官方 `sim_bridge`**（详见 §5.8）。
 
 **仍待决：**
-- [ ] **Vibe Mode 去留**：独立于 UI 层的架构决策。保留 → 与 UI 同级的"冻结层"（前 2 MiB 冻结 ABI、`flash` 目标被 `retained_recovery.cmake` 接管、产品烧 bundle 的 bootloader、换屏需回 utils 改 bootloader 并过 24 KiB 容量；S31 产物需为 P4 整体重建）；去除 → 分区表与 flash 流程自作，消掉上述硬约束。折中 → 剥离机制、复用"单槽+常驻维护固件+NVS 启动意图"思想自建。详见 `docs/vibe-mode-and-ideas-analysis.md` §11。
 - [ ] 响应式布局 DSL 的具体形式（设计基准 + scale 规则 vs 容器/锚点模型）。
 - [ ] focus/nav 交互模型细节（方向键移动、确认、返回、滚动）。
 - [ ] 自研 UI 目录的组织与上游 `mosaic_ui` 的共存/替换方式（是否物理移除）。
