@@ -1,9 +1,11 @@
 # ESP-MOSAICO-CLAW 二开可行性分析与最终决议
 
-> 状态：**已定稿，待开工**
+> 状态：**动手前调研已完成，待开工**
 > 目的：记录一次完整的架构/耦合分析结论与最终方案，后续正式开工时直接取用，无需重新扫库。
 > 适用仓库：`esp-mosaico-claw`（本仓库，产品整机工程）
+> 关联文档：`docs/vibe-mode-and-ideas-analysis.md`（Vibe Mode/Ideas 实现分析）、`docs/p4-vs-s31-feasibility.md`（P4 可移植性评估）、`docs/board-jc-esp32p4-m3-dev.md`（目标板板级资料）
 > 本文档基于的分析快照：`master` @ `2e1017e`，esp-claw submodule @ `62aaeed7de8f3055615448620dd00ed39fd6af13`，esp-mosaico-utils submodule @ `ca2f9c1eae4d95cd11ca49487949a8f5e7a39f9c`。
+> 调研补充（本轮完成）：Vibe Mode/Ideas 实现机制、P4 可移植性（含芯片与产品层证据）、目标板 JC-ESP32P4-M3-DEV 板级事实与实测结论。
 
 ---
 
@@ -17,6 +19,9 @@
   - **跟随层（尽量不改、直接跟上游）**：板级框架、显示 HAL、服务层、`app_claw`、esp-claw。
   - **自研/分叉层（冻结为自有）**：`mosaic_ui` 的 UI 作者层（场景生成 + 响应式布局 + 多输入）。
 - **esp-claw 本地二开（修 bug）与本方案正交**：把 submodule 指向本地 fork 即可。
+- **目标硬件已定：ESP32-P4 + JC-ESP32P4-M3-DEV（板载 C6）+ JD9365 10.1″ DSI 无触控。** 调研确认：**Wi-Fi/DSI/音频/USB HID/SD/PPA/GSP 全部就绪**，无线走产品层已内置的 `esp_wifi_remote`+`esp_hosted`。
+- **唯一硬功能缺失：蓝牙音频 A2DP**（板载 C6 无 Classic BR/EDR）→ **决议：去掉该 App**（非核心功能）。
+- **调研结论**：mosaico 上层封装**大体与芯片解耦**，S31 锁定集中在**板级 + 启动 + Vibe Mode + 打包目标**，不在服务层。
 
 ---
 
@@ -132,9 +137,11 @@ Python 场景生成器(本仓库) → 闭源预编译 GSP 编译器 gspc(esp-gsp
 ## 4. 目标硬件与诉求（本次决策输入）
 
 - **目标芯片**：ESP32-P4、ESP32-S31 及未来同代高性能模组（**确认 PPA 可用**）。旧的 S3 不列为目标（跑 esp-claw 已吃力，再叠产品层性能不足）。
-- **现有硬件**：P4 开发板 + **10.1" DSI 屏，无触控**。
+- **当前目标板（已定）**：**JC-ESP32P4-M3-DEV** —— ESP32-P4 + **板载 ESP32-C6**（Wi-Fi 6/BLE，SDIO + ESP-Hosted）+ **32 MB PSRAM** + **16 MB NOR** + **MIPI-DSI 2-lane** + **MIPI-CSI** + **ES8311 音频（模拟麦 + NS4150 功放）** + TF 卡 + **HS/FS 双 USB-OTG** + 以太网。详见 `docs/board-jc-esp32p4-m3-dev.md`。
+- **现有硬件（已实测）**：**JD9365 10.1″ DSI 屏，无触控**；音频可录可放；USB HID（2.4G 键鼠）可枚举；Wi-Fi / SD 正常。
 - **UI 诉求**：把 mosaic 的**圆屏特例化交互**改为**响应式**，支持各种比例/分辨率。
-- **输入诉求**：同时支持**触控**与**非触控**（GPIO 按钮、USB HID 键鼠）。
+- **输入诉求**：同时支持**触控**与**非触控**（GPIO 按钮 S1–S4、USB HID 键鼠）。
+- **供电**：USB 供电（板载 IP5306 但无电量计，不做电池策略）。
 - **esp-claw 诉求**：已有本地二开 fork 用于修复内核问题。
 
 ---
@@ -205,6 +212,7 @@ Python 场景生成器(本仓库) → 闭源预编译 GSP 编译器 gspc(esp-gsp
 | `components/cap_system` / `cap_im_ai_create` | 跟随(本地覆盖) | 注意本地分叉需人工同步上游 |
 | `third-party/esp-claw` | submodule → 本地 fork | 独立迭代 |
 | `components/mosaic_ui`（场景作者层/apps） | **自研替代** | 响应式布局 + 新形态场景 |
+| `components/mosaic_ui/apps/bluetooth` | **去除** | A2DP(Classic) 依赖；板载 C6 无 BR/EDR，P4 上不可用（见 `docs/p4-vs-s31-feasibility.md` §7.2） |
 | `components/mosaico_boot_splash` | **改写/去除** | CO5300/QSPI 专属 bootloader 手递手 |
 | `third-party/esp-mosaico-utils` / `retained_recovery.cmake` / `partitions_16MB.csv` | **基本去除** | 单产品 Vibe Mode 固化，非通用 |
 | `tools/cmake/esp_idf_patch.cmake` | 视需要 | 改 IDF 源码；换 IDF 版本需复检 |
@@ -218,6 +226,25 @@ Python 场景生成器(本仓库) → 闭源预编译 GSP 编译器 gspc(esp-gsp
   - 维护一份 **"被迫修改的共享文件清单"**（`main/main.c` 条件、根 `CMakeLists.txt`、`sdkconfig.defaults`、`tools/cmake/*` 等）；每次同步上游只重点 review 这些。
   - esp-claw 侧改动**尽量收敛到 `app_claw` 不依赖的部分**，减少对 mosaico 的连带影响。
 - **预期**：UI 层与上游 UI 全面分叉（接受）；服务层/板级/集成层保持可跟随（收益来源）。
+
+### 5.7 动手前调研闭环（本轮结论）
+
+调研产出三份配套文档，结论如下：
+
+| 调研项 | 结论 | 文档 |
+|---|---|---|
+| **Vibe Mode / Ideas 是什么** | 不是组件，而是藏在 `esp-mosaico-utils` 里的**第二个完整固件**（预编译包），以 Recovery ABI 共享 Flash 前 2 MiB，作为刷不坏的维护固件 | `docs/vibe-mode-and-ideas-analysis.md` |
+| **P4 能否承载本方案** | **能**。PPA/GSP/2D-DMA 齐全，`esp-gsp` 官方目标含 `esp32p4` 且有 P4+MIPI-DSI benchmark；P4 原生 DSI，**比 S31 更适合大屏** | `docs/p4-vs-s31-feasibility.md` |
+| **mosaico 上层封装能否移植** | **能**。服务层大体与芯片解耦；`wifi_manager` 已内置 `esp32p4` 分支（`esp_wifi_remote`+`esp_hosted`），`display_service` 已有真实 DSI 处理，`esp_lvgl_present` 已有 MIPI 配置宏。S31 锁定只在**板级 + 启动 + Vibe Mode + 打包目标** | 同上 §2.7 |
+| **目标板能力** | **JC-ESP32P4-M3-DEV 已实测**：Wi-Fi、JD9365 DSI、音频录放、USB HID、SD 全部正常；另有以太网；**无传感器/电量计/NAND** | `docs/board-jc-esp32p4-m3-dev.md` |
+| **唯一硬缺失** | **蓝牙音频 A2DP**（板载 C6 无 Classic BR/EDR）→ **决议：去掉该 App** | 同上 §7.2 |
+
+**由此固化的决议：**
+1. 目标板锁定 **JC-ESP32P4-M3-DEV**（P4 + 板载 C6 + 32 MB PSRAM + 16 MB NOR + DSI）。
+2. 无线**不新增架构**，启用产品层已就绪的 `esp_wifi_remote` + `esp_hosted`。
+3. **删除** `mosaic_ui/apps/bluetooth`（A2DP 不可用，且非核心）。
+4. **去除** boot splash（CO5300/QSPI 专属，且 bootloader 分支本就是死代码）。
+5. 功能裁剪：无 IMU/磁力计/电量计 → 裁 `app_claw_hw_bridge` 资源表；供电按 USB 固定，不做电池策略。
 
 ---
 
@@ -233,32 +260,43 @@ Python 场景生成器(本仓库) → 闭源预编译 GSP 编译器 gspc(esp-gsp
 | boot splash（CO5300/QSPI 专属）耦合 bootloader | 换屏需改 bootloader 逻辑 | spike 中先跑通"无 splash"基线 |
 | 多板路径**从未被上游验证** | 边界暗坑 | 我们从最小板开始，逐步加回设备 |
 | 无触控 + 大屏的交互设计缺失 | UX 不完整 | 与输入方案同步设计 |
+| ~~P4 无 Wi-Fi~~ | **已消除** | 板载 C6 + 产品层已内置 `esp_wifi_remote`/`esp_hosted` |
+| **蓝牙音频 A2DP 不可用** | 失去"蓝牙音箱"App | **已决议去除该 App**（非核心） |
+| **无 IMU/磁力计/电量计** | 部分产品功能需裁剪 | 裁 `app_claw_hw_bridge` 资源表；可选外接 I2C |
 
 ---
 
 ## 7. Spike 验证清单（开工第一步，1–2 天可出结论）
 
-1. **显示通路**：P4 + DSI + 10.1"，最小板 + `display_service` + `esp_display_present`，全屏测试图 → 确认 DSI/分辨率/旋转/无触控 OK；先**不含** boot splash。
-2. **GSP 非 480 实测**：在目标分辨率跑一个 GSP 场景，测帧率/内存/带宽 → 决定是否坚持 GSP。
-3. **响应式单点改造**：照 `welcome` 的 width 参数化改一个 app（如 `settings`），度量"单 app 改造行数/耗时" → ×15 估总量。
-4. **冲突面盘点**：记录被迫编辑的共享文件清单 = 真实合并冲突面。
+> **前置已闭合**（本轮调研完成，无需再验）：Wi-Fi/esp_hosted、DSI 显示、音频录放、USB HID、SD、PPA/GSP 可用性、产品层 P4 就绪度、蓝牙 A2DP 不可用（已决议去除）。
+> 因此 Spike 只保留**真正未知**的三项。
+
+1. **GSP 非 480 实测**：在 800×1280 跑一个 GSP 场景，测帧率/内存/带宽 → 决定是否坚持 GSP（唯一可能推翻 UI 路线的点）。
+2. **响应式单点改造**：照 `welcome` 的 width 参数化改一个 app（如 `settings`），度量"单 app 改造行数/耗时" → ×15 估总量。
+3. **冲突面盘点**：记录被迫编辑的共享文件清单 = 真实合并冲突面。
 
 **Go/No-Go 判定**：
-- 若 §7.2 性能达标且 §7.4 冲突面可控 → 按本方案执行。
-- 若 §7.2 不达标 → 回退到"服务层 + LVGL 自研 UI"（放弃 GSP/PPA 合成），其余不变。
-- 若 §7.4 冲突面过大（大量深改共享文件）→ 调整为"**抽取组件自建工程**"：vendor 服务层组件 + esp-claw submodule，不整仓跟踪。
+- 若 §7.1 性能达标且 §7.3 冲突面可控 → 按本方案执行。
+- 若 §7.1 不达标 → 回退到"服务层 + LVGL 自研 UI"（放弃 GSP/PPA 合成），其余不变。
+- 若 §7.3 冲突面过大（大量深改共享文件）→ 调整为"**抽取组件自建工程**"：vendor 服务层组件 + esp-claw submodule，不整仓跟踪。
 
 ---
 
 ## 8. 待决问题（开工时确认）
 
-- [ ] 目标屏具体分辨率/色深/接口时序（确认 10.1" DSI 参数与 PPA 能力匹配）。
+**已关闭（本轮调研结论）：**
+- [x] ~~目标屏具体分辨率/色深/接口时序~~ → **JD9365 10.1″，800×1280，DSI 2-lane，无触控**（已实测点亮）。
+- [x] ~~USB HID host 栈选型~~ → P4 原生 `usb_host` + `hid_host`，HS OTG 口，已实测 2.4G 键鼠。
+- [x] ~~P4 无线方案~~ → **板载 C6（SDIO + ESP-Hosted）**；产品层 `wifi_manager` 已内置 `target in [esp32p4]` 分支。
+- [x] ~~蓝牙音频~~ → **C6 无 Classic BR/EDR，A2DP 不可用 → 决议去除 `mosaic_ui/apps/bluetooth`**。
+- [x] ~~boot splash~~ → 换 P4+DSI 后 **直接去除**（原实现为 CO5300/QSPI + `LP_STORE15` 手递手，且其 bootloader 分支本就是死代码）。
+
+**仍待决：**
+- [ ] **Vibe Mode 去留**：独立于 UI 层的架构决策。保留 → 与 UI 同级的"冻结层"（前 2 MiB 冻结 ABI、`flash` 目标被 `retained_recovery.cmake` 接管、产品烧 bundle 的 bootloader、换屏需回 utils 改 bootloader 并过 24 KiB 容量；S31 产物需为 P4 整体重建）；去除 → 分区表与 flash 流程自作，消掉上述硬约束。折中 → 剥离机制、复用"单槽+常驻维护固件+NVS 启动意图"思想自建。详见 `docs/vibe-mode-and-ideas-analysis.md` §11。
 - [ ] 响应式布局 DSL 的具体形式（设计基准 + scale 规则 vs 容器/锚点模型）。
 - [ ] focus/nav 交互模型细节（方向键移动、确认、返回、滚动）。
-- [ ] USB HID host 栈选型（`usb_host` + `hid_host`）。
-- [ ] 是否完全去掉 Vibe Mode / retained_recovery 固化（影响分区表与 flash 流程）。
-- [ ] boot splash 方案（自绘 vs 沿用 bootloader 手递手，按新屏适配）。
 - [ ] 自研 UI 目录的组织与上游 `mosaic_ui` 的共存/替换方式（是否物理移除）。
+- [ ] 无传感器/电量计/NAND 后的**功能裁剪范围**（`app_claw_hw_bridge` 资源表、相机是否启用）。
 
 ---
 
