@@ -323,6 +323,7 @@ Vibe Mode 的 `pc/` 模拟器跑的是 `vui.c`（自绘 480×480 RGB565，`simul
 
 1. **GSP 非 480 实测**：在 800×1280 跑一个 GSP 场景，测帧率/内存/带宽 → 决定是否坚持 GSP（唯一可能推翻 UI 路线的点）。
    - **可先在 PC 上做一半**：`sim_bridge` 能按 800×1280 的 bundle 渲染，先验证布局/交互/文字排版；帧率/带宽仍必须上板实测（模拟器明确声明不替代设备时序验证）。
+   - **PC 侧已验证（2026-10-19）**：800×1280 竖屏场景编译渲染正常；`tap` 注入、`screenshot`、`frame_info` 脏矩形、后端定时数据驱动均可用；AI 可直接读 PNG 完成闭环。命令与结论见 `dev-env-and-pc-sim-handoff.md`。**剩余只有真机性能一项。**
 2. **响应式单点改造**：照 `welcome` 的 width 参数化改一个 app（如 `settings`），度量"单 app 改造行数/耗时" → ×15 估总量。
 3. **冲突面盘点**：记录被迫编辑的共享文件清单 = 真实合并冲突面。
 
@@ -374,6 +375,9 @@ Vibe Mode 的 `pc/` 模拟器跑的是 `vui.c`（自绘 480×480 RGB565，`simul
 | Vibe Mode/恢复固化 | `tools/cmake/retained_recovery.cmake`、`partitions_16MB.csv` |
 | boot splash | `components/mosaico_boot_splash/` |
 | 产品数据/资源 | `fatfs_image/system/` |
+| 工具链/PC 模拟器实测 | `docs/dev-env-and-pc-sim-handoff.md` |
+| 设备侧日志接口 | `components/http_server/http_server_logs_api.c`（`WS /ws/logs`、`GET /api/logs/status`） |
+| 设备侧截图 | **不存在**；需新增 `/api/screenshot`（见 handoff §5.2） |
 
 ## 附录 B：直接 include `claw_*/cap_*` 的文件（耦合泄漏点，~22 个）
 
